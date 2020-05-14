@@ -1,6 +1,6 @@
 from time import sleep
 
-from psycopg2 import connect
+from elasticsearch import Elasticsearch
 from urllib import parse
 
 from driver_factory import get_driver
@@ -15,15 +15,21 @@ character_ids = {}
 SELECTED_SEASON = 1
 
 try:
-    conn = connect('host=localhost dbname=spongebob user=postgres')
-    cur = conn.cursor()
-    cur.execute('SELECT tag, title, season_num FROM episodes WHERE season_num=%s ORDER BY tag ASC;', (SELECTED_SEASON,))
-    # cur.execute('SELECT tag, title, season_num FROM episodes WHERE tag=%s ORDER BY tag ASC;', ('1a',))
-    episodes = cur.fetchall()
-    # episodes = cur.fetchmany(5)
+    es = Elasticsearch()
+    es.indices.create(index='voice_lines', ignore=[400])
+    es.indices.create(index='characters', ignore=[400])
+    episodes = es.search(index='episodes', body=
+    { 'query':
+        { 'bool': 
+            { 'must': [
+                { 'match': { 'season_num': SELECTED_SEASON } }
+            ]}
+        }
+    })['hits']['hits']
+    print(episodes)
     for episode in episodes:
-        tag = episode[0]
-        title = episode[1]
+        tag = episode['_source']['tag']
+        title = episode['_source']['title']
 
         url = 'https://' + parse.quote(f'spongebob.fandom.com/wiki/{title}/transcript')
         driver.get(url)
@@ -42,19 +48,24 @@ try:
             
             for character in characters:
                 if character not in character_ids:
-                    cur.execute('SELECT id FROM characters WHERE name=%s;', (character,))
-                    character_result = cur.fetchone()
-                    if character_result == None:
-                        cur.execute('INSERT INTO characters (name) VALUES (%s) RETURNING id;', (character,))
-                        character_result = cur.fetchone()
-                    character_ids[character] = character_result[0]
+                    character_query = \
+                    { 'query':
+                        { 'bool': 
+                            { 'must': [
+                                { 'match': { 'name': character } }
+                            ]}
+                        }
+                    }
+                    character_result = es.search(index='characters', body=character_query)['hits']['hits']
+                    if character_result == []:
+                        es.index(index='characters', body={'name': character}, refresh=True)
+                        character_result = es.search(index='characters', body=character_query)['hits']['hits']
+                    character_ids[character] = character_result[0]['_id']
             
                 character_id = character_ids[character]
 
-                cur.execute('INSERT INTO voice_lines (character_id, said_what, episode_tag, line_number) VALUES (%s, %s, %s, %s)',
-                                (character_id, said_what, tag, i))
+                es.index(index='voice_lines',
+                    body={'character_id': character_id, 'said_what': said_what, 'episode_tag': tag, 'line_number': i})
 
-    conn.commit()
-            
 finally:
     driver.quit()
